@@ -84,10 +84,12 @@ class SHACSolver:
         
         self.population_energies = self.function(self._scale_parameters(self.population)).reshape(-1)
         best_ind = np.argmin(self.population_energies)
-        self.best_candidate = self.population[best_ind]
+        self.best_candidate = self.population[best_ind].copy()
         self.best_candidate_energy = self.population_energies[best_ind]
         self.nfev = self.popsize
         
+        self.mutation = 0.5
+        self.cr = 0.5
         
     def __enter__(self):
         return self
@@ -110,8 +112,54 @@ class SHACSolver:
     
     def _get_training_y(self, y):
         median = np.median(y)
-        return np.where(y > median, 1, 0)
+        return np.where(y < median, 1, 0)
     
+    
+    def _mutate(self, candidate_i):
+        r1, r2 = np.random.choice(np.concatenate((np.arange(candidate_i), np.arange(candidate_i+1, self.popsize))), size=2, replace=False)
+        trial = self.population[candidate_i] + self.mutation * (self.population[r1] - self.population[r2])
+        return trial
+    
+
+    def _crossover(self, candidate, trial):
+        rand = np.random.random(self.dim)
+        trial = np.where(rand < self.cr, trial, candidate)
+        return trial
+    
+    
+    def _rand2bin(self):
+        trials = np.array([self._crossover(self.population[i], self._mutate(i)) for i in range(self.popsize)])
+        return np.clip(trials, 0, 1)
+    
+    
+    def _get_new_points_DE(self):
+        n = 0
+        mutated = np.zeros(self.popsize)
+        points_generated = 0
+        while points_generated < self.popsize:
+            trials = self._rand2bin()
+            passed = np.zeros(self.popsize)
+            
+            for clf in self.clfs:
+                #passed = np.logical_and(passed, clf.predict(trials).astype(bool))
+                passed = passed + clf.predict(trials)
+            
+            passed = passed > 0.85*len(self.clfs)
+            
+            self.population[passed, :] = trials[passed, :]
+            mutated = np.logical_or(mutated, passed)
+            points_generated = np.sum(mutated)
+            
+            if self.verbose:
+                print(f"generating new candidates, {points_generated} completed...")
+            
+            if n > 100:
+                self.population[~mutated] = qmc.LatinHypercube(self.dim).random(n=(self.popsize-points_generated))
+                break
+            n += 1
+        self.population_energies = self.function(self._scale_parameters(self.population)).reshape(-1)
+        self.nfev += self.popsize
+            
     
     def _get_new_points(self):
         points_generated = 0
@@ -151,17 +199,18 @@ class SHACSolver:
             
             # generate new population and update best solution
             self._get_new_points()
+            #self._get_new_points_DE()
             
             best_ind = np.argmin(self.population_energies)
             if self.population_energies[best_ind] < self.best_candidate_energy:
-                self.best_candidate_energy = self.population_energies[best_ind]
+                self.best_candidate_energy = self.population_energies[best_ind].copy()
                 self.best_candidate = self.population[best_ind]
             
             if self.callback is not None:
                 if self.callback(self.best_candidate):
                     break
         
-        return self.best_candidate, self.best_candidate_energy
+        return self._scale_parameters(self.best_candidate), self.best_candidate_energy
                 
             
             
